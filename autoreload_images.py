@@ -7,7 +7,7 @@ bl_info = {
     "name": "Image Auto Reload",
     "description": "Automatically reloads any images when they change on disk.",
     "author": "alexandru.pana@manabreakstudios.com",
-    "version": (0, 0, 1),
+    "version": (0, 0, 2),
     "blender": (2, 78, 0),
     "location": "3D View > Properties (N)",
     "warning": "", # used for warning icon and text in addons panel
@@ -15,13 +15,6 @@ bl_info = {
     "tracker_url": "",
     "category": "3D View"
 }
-
-class ImageAutoReloadSettings(bpy.types.PropertyGroup):
-    enabled = BoolProperty(
-        name="Enable auto reload",
-        description="Enables image auto reloading",
-        default = False
-    )
 
 class ImageAutoReloadPanel(bpy.types.Panel):
     """Creates a Panel in the Object properties window"""
@@ -34,9 +27,12 @@ class ImageAutoReloadPanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         scene = context.scene
-        props = scene.autoreload_images
+        wm = context.window_manager
         
-        layout.prop(props, "enabled", text="Enabled")
+        if not wm.image_autoreload_enabled:
+            layout.operator("images.autoreload", text="Enable")
+        else:
+            layout.operator("images.autoreload", text="Disable")
 
 class ImageAutoReloadOperator(bpy.types.Operator):
     """Auto reload images"""
@@ -44,51 +40,87 @@ class ImageAutoReloadOperator(bpy.types.Operator):
     bl_idname = "images.autoreload"
     bl_label = "Image Auto Reload Operator"
 
-    poll_interval = 0.5
     timer = None
     
-    _last_poll = None
+    last_poll = None
     
     def modal(self, context, event):
-        props = context.scene.autoreload_images
         
-        if props.enabled and event.type == "TIMER":
+        # Handle stop request
+        if not context.window_manager.image_autoreload_enabled:
+            ImageAutoReloadOperator.handle_stop(context)
+            return {'CANCELLED'}
+
+        # Handle timer events
+        if event.type == "TIMER":
             now = time()
-            if self._last_poll is None or now - self._last_poll > self.poll_interval:
-                scan_and_reload(self._last_poll or now)
-                self._last_poll = now
+            scan_and_reload(self.last_poll)
+            self.last_poll = now
 
         return {'PASS_THROUGH'}
 
+    @staticmethod
+    def handle_start(context):
+        if not context.window_manager.image_autoreload_enabled:
+            context.window_manager.image_autoreload_enabled = True
+            ImageAutoReloadOperator.timer = context.window_manager.event_timer_add(1, context.window)
+            ImageAutoReloadOperator.last_poll = time()
+            print("Started ImageAutoReload")
+
+    @staticmethod
+    def handle_stop(context):
+        if context.window_manager.image_autoreload_enabled:
+            context.window_manager.event_timer_remove(ImageAutoReloadOperator.timer)
+            context.window_manager.image_autoreload_enabled = False
+            print("Stopped ImageAutoReload")
+
     def invoke(self, context, event):
-        self.timer = context.window_manager.event_timer_add(0.1, context.window)
-        context.window_manager.modal_handler_add(self)
-        print("INVOKE")
-        return {'RUNNING_MODAL'}
-    
+        wm = context.window_manager
+
+        if not wm.image_autoreload_enabled:
+            ImageAutoReloadOperator.handle_start(context)
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+        else:
+            ImageAutoReloadOperator.handle_stop(context)
+            return {'CANCELLED'}
+        
 def time_since_last_update(image, last_update):
-    return os.lstat(image.filepath_from_user()).st_mtime - last_update
+    try:
+        return os.lstat(image.filepath_from_user()).st_mtime - last_update
+    except:
+        return -1
 
 def reload_viewports():
         for area in bpy.context.screen.areas:
             area.tag_redraw()
 
 def scan_and_reload(last_update):
+    reload_required = False
     for image in bpy.data.images:
         if image.type == "IMAGE" and time_since_last_update(image, last_update) > 0:
             print("Reloading " + image.name)
             image.reload()
-            reload_viewports()
+            reload_required = True
+    if reload_required:
+        reload_viewports()
 
 def register():
-    bpy.utils.register_module(__name__)
-    bpy.types.Scene.autoreload_images = PointerProperty(type=ImageAutoReloadSettings)
+    wm = bpy.types.WindowManager
+    
+    # Runstate initially always set to False
+    # note: it is not stored in the Scene, but in window manager:
+    wm.image_autoreload_enabled = bpy.props.BoolProperty(default=False)
 
-def unregister():
     bpy.utils.register_module(__name__)
-    del bpy.types.Scene.autoreload_images
+    
+def unregister():
+    bpy.utils.unregister_module(__name__)
+    
+    wm = bpy.context.window_manager
+    if "image_autoreload_enabled" in wm:
+        del wm["image_autoreload_enabled"]
 
 
 if __name__ == "__main__":
     register()
-    bpy.ops.images.autoreload('INVOKE_DEFAULT')
